@@ -313,6 +313,7 @@ codeActionTests = testGroup "code actions"
   , addSigActionTests
   , insertNewDefinitionTests
   , deleteUnusedDefinitionTests
+  , removeUnusedRecordWildcardTests
   , addInstanceConstraintTests
   , addFunctionConstraintTests
   , removeRedundantConstraintsTests
@@ -2524,6 +2525,47 @@ insertNewDefinitionTests = testGroup "insert new definition actions"
         ++ txtB')
   ]
 
+
+removeUnusedRecordWildcardTests :: TestTree
+removeUnusedRecordWildcardTests = testGroup "remove unused record wildcard"
+  [ check "wildcard only" "f Foo{..} = \"Hello\"" "f Foo{} = \"Hello\""
+  , check "preserve explicit field" "f Foo{x=n,..} = show n" "f Foo{x=n} = show n"
+  , check "preserve multiple explicit fields"
+      "f Foo{x=n,y=m,..} = show (n,m)" "f Foo{x=n,y=m} = show (n,m)"
+  , check "case pattern"
+      "f record = case record of Foo{..} -> \"Hello\""
+      "f record = case record of Foo{} -> \"Hello\""
+  , check "multiline pattern"
+      "f Foo{ x = n\n     , ..\n     } = show n"
+      "f Foo{ x = n\n      \n     } = show n"
+  , check "preserve comment"
+      "f Foo{x=n, {- keep -} ..} = show n"
+      "f Foo{x=n {- keep -} } = show n"
+  , testSession "used wildcard has no removal action" $ do
+      doc <- createDoc "A.hs" "haskell" $ T.unlines $ header ++ ["f Foo{..} = show x"]
+      typechecked <- Development.IDE.Test.waitForTypecheck doc
+      liftIO $ assertBool "Expected the used wildcard to typecheck" typechecked
+      actions <- getAllCodeActions doc
+      assertNoActionWithTitle "Remove unused record wildcard" actions
+  ]
+  where
+    header =
+      [ "{-# LANGUAGE RecordWildCards #-}"
+      , "{-# OPTIONS_GHC -Wunused-record-wildcards #-}"
+      , "module A where"
+      , "data Foo = Foo { x :: Int, y :: Int, name :: String }"
+      , "f :: Foo -> String"
+      ]
+    check name before after = testSession name $ do
+      doc <- createDoc "A.hs" "haskell" $ T.unlines $ header ++ [before]
+      diags <- waitForDiagnostics
+      liftIO $ assertBool "Expected an unused record wildcard warning" $
+        any (T.isInfixOf "No variables bound" . (^. L.message)) diags
+      action <- pickActionWithTitle "Remove unused record wildcard" =<< getAllCodeActions doc
+      liftIO $ action ^. L.kind @?= Just CodeActionKind_QuickFix
+      executeCodeAction action
+      contents <- documentContents doc
+      liftIO $ contents @?= T.unlines (header ++ [after])
 
 deleteUnusedDefinitionTests :: TestTree
 deleteUnusedDefinitionTests = testGroup "delete unused definition action"

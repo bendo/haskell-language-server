@@ -59,6 +59,7 @@ import           Development.IDE.GHC.Compat.Util
 import           Development.IDE.GHC.Error
 import           Development.IDE.GHC.ExactPrint
 import qualified Development.IDE.GHC.ExactPrint                    as E
+import           Development.IDE.GHC.ExactPrint.Annotation         (trailingAnns)
 import           Development.IDE.GHC.Util                          (printOutputable,
                                                                     printRdrName)
 import           Development.IDE.Plugin.CodeAction.Args
@@ -78,7 +79,9 @@ import           Development.IDE.Types.Location
 import           Development.IDE.Types.Options
 import           GHC                                               (DeltaPos (..),
                                                                     EpAnn (..),
-                                                                    LEpaComment)
+                                                                    LEpaComment,
+                                                                    TrailingAnn (AddCommaAnn),
+                                                                    epaLocationRealSrcSpan)
 import           GHC.Iface.Ext.Types                               (ContextInfo (..),
                                                                     IdentifierDetails (..))
 import qualified GHC.LanguageExtensions                            as Lang
@@ -207,6 +210,7 @@ bindingsPluginDescriptor recorder plId = mkExactprintPluginDescriptor recorder $
       wrap suggestReplaceIdentifier
     , wrap suggestImplicitParameter
     , wrap suggestNewDefinition
+    , wrap suggestRemoveUnusedRecordWildcard
     , wrap Development.IDE.Plugin.Plugins.AddArgument.plugin
     ]
     plId
@@ -624,6 +628,34 @@ unnecessaryExportModule (TcRnDodgyExports (GRE {gre_name})) = Just (( printOutpu
 unnecessaryExportModule (TcRnDodgyExports name) = Just (( printOutputable $ occName name) <> "(..)" )
 #endif
 unnecessaryExportModule _ = Nothing
+
+suggestRemoveUnusedRecordWildcard :: ParsedModule -> FileDiagnostic -> [(T.Text, [TextEdit])]
+suggestRemoveUnusedRecordWildcard parsed fd@FileDiagnostic{fdLspDiagnostic=Diagnostic{_range}} =
+  [ ("Remove unused record wildcard", TextEdit _range "" : commaEdits fields)
+#if MIN_VERSION_ghc(9,7,0)
+  | Just TcRnUnusedRecordWildcard{} <- [tcMessageFd fd]
+#else
+  | "No variables bound in the record wildcard match are used" `T.isInfixOf` (fdLspDiagnostic fd ^. L.message)
+#endif
+  , L _ ConPat{pat_args=RecCon fields} <- SYB.listify matches (pm_parsed_source parsed)
+  ]
+  where
+    matches :: LPat GhcPs -> Bool
+    matches (L _ ConPat{pat_args=RecCon fields}) =
+      (srcSpanToRange . getLoc =<< rec_dotdot fields) == Just _range
+    matches _ = False
+    -- Use the original AST's punctuation spans rather than reprinting the
+    -- pattern: comments attached to the removed wildcard must be preserved.
+    commaEdits :: HsRecFields GhcPs (LPat GhcPs) -> [TextEdit]
+    commaEdits fields =
+      [ TextEdit (realSrcSpanToRange $ epaLocationRealSrcSpan location) ""
+      | L ann _ <- take 1 $ reverse $ rec_flds fields
+#if MIN_VERSION_ghc(9,11,0)
+      , AddCommaAnn (EpTok location@EpaSpan{}) <- trailingAnns ann
+#else
+      , AddCommaAnn location@EpaSpan{} <- trailingAnns ann
+#endif
+      ]
 
 suggestDeleteUnusedBinding :: ParsedModule -> Maybe T.Text -> FileDiagnostic -> [(T.Text, [TextEdit])]
 suggestDeleteUnusedBinding
